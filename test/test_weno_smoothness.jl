@@ -62,3 +62,64 @@ using Oceananigans.Advection: beta_loop, biased_weno_weights
         end
     end
 end
+
+@testset "Float32 WENO weights beside a large jump" begin
+    # A tracer that is exactly zero on one side of a front and of magnitude ~1e8 on the other
+    # (an ice number concentration in kg⁻¹ at a cloud edge). The sub-stencil inside the zero
+    # region is exactly flat (β = 0), so its ratio τ / (β + ϵ) ~ ψ² / ϵ is of order 1e24, whose
+    # square is beyond floatmax(Float32). The normalized evaluation must stay finite and agree
+    # with the Float64 weights; the smooth-stencil weights must be unchanged by the normalization.
+    for order in (3, 5, 7, 9), amplitude in (1e6, 1e8)
+        buffer = Int((order + 1) ÷ 2)
+        n_stencil = 2 * buffer
+
+        S_f64 = ntuple(i -> i > buffer + 1 ? amplitude : i == buffer + 1 ? amplitude / 2000 : 0.0, n_stencil)
+        S_f32 = ntuple(i -> Float32(S_f64[i]), n_stencil)
+
+        ψ_f64 = ntuple(Val(buffer)) do k
+            start = buffer - k + 1
+            ntuple(j -> S_f64[start + j - 1], Val(buffer))
+        end
+
+        ψ_f32 = ntuple(Val(buffer)) do k
+            start = buffer - k + 1
+            ntuple(j -> S_f32[start + j - 1], Val(buffer))
+        end
+
+        scheme_f64 = WENO(Float64; order, weight_computation=Oceananigans.Utils.NormalDivision)
+        scheme_f32 = WENO(Float32; order, weight_computation=Oceananigans.Utils.NormalDivision)
+
+        ω_f64 = biased_weno_weights(ψ_f64, nothing, scheme_f64)
+        ω_f32 = biased_weno_weights(ψ_f32, nothing, scheme_f32)
+
+        @testset "WENO order $order, amplitude $amplitude" begin
+            @test all(isfinite, ω_f32)
+            @test sum(ω_f64) ≈ 1
+            @test sum(ω_f32) ≈ 1
+
+            for r in 1:buffer
+                @test ω_f32[r] ≈ ω_f64[r] atol=1e-3
+            end
+        end
+    end
+
+    # Ratios at most one: the normalized evaluation reproduces the textbook formula exactly.
+    for order in (5, 9)
+        buffer = Int((order + 1) ÷ 2)
+        n_stencil = 2 * buffer
+        S = ntuple(i -> 300.0f0 + 0.1f0 * sinpi(2f0 * (i - 1) / n_stencil), n_stencil)
+        ψ = ntuple(Val(buffer)) do k
+            start = buffer - k + 1
+            ntuple(j -> S[start + j - 1], Val(buffer))
+        end
+
+        scheme = WENO(Float32; order, weight_computation=Oceananigans.Utils.NormalDivision)
+        β = beta_loop(scheme, ψ)
+        τ = Oceananigans.Advection.global_smoothness_indicator(Val(buffer), β)
+        ϵ = Oceananigans.Advection.ϵ
+        r = ntuple(s -> τ / (β[s] + ϵ), buffer)
+        @test maximum(r) <= 1
+        α = ntuple(s -> Oceananigans.Advection.C★(scheme, Val(s - 1)) * (1 + r[s]^2), buffer)
+        @test Oceananigans.Advection.zweno_alpha_loop(scheme, β, τ) == α
+    end
+end

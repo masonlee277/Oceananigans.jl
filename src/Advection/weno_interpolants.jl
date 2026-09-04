@@ -302,11 +302,28 @@ end
     return :($(elem...),)
 end
 
-# ZWENO α weights C★ᵣ * (1 + (τ₂ᵣ₋₁ / (βᵣ + ϵ))ᵖ)
+# ZWENO ratios rᵣ = τ₂ᵣ₋₁ / (βᵣ + ϵ)
+@inline function metaprogrammed_zweno_ratio_loop(buffer)
+    elem = Vector(undef, buffer)
+    for stencil = 1:buffer
+        elem[stencil] = :(newton_div(WCT, τ, β[$stencil] + ϵ))
+    end
+
+    return :($(elem...),)
+end
+
+# ZWENO α weights C★ᵣ * (1 + rᵣᵖ), evaluated on ratios normalized by the largest one.
+#
+# The weights ω = α / Σα are invariant to a common positive factor, so with m = max(1, r₁, …, rₙ)
+# and m⁻¹ = 1 / m the expression C★ᵣ * (m⁻² + (rᵣ m⁻¹)²) = C★ᵣ * (1 + rᵣ²) / m² yields the same
+# ω in exact arithmetic and is identical to the textbook formula whenever every ratio is at most
+# one. The normalization keeps the evaluation finite: an exactly flat stencil (βᵣ = 0) next to a
+# jump of size ψ gives rᵣ = τ / ϵ ~ ψ² / ϵ, whose square overflows Float32 once ψ ≳ 1e6 (number
+# concentrations in kg⁻¹, for example), so that α = Inf and ω = Inf / Inf = NaN.
 @inline function metaprogrammed_zweno_alpha_loop(buffer)
     elem = Vector(undef, buffer)
     for stencil = 1:buffer
-        elem[stencil] = :(C★(scheme, Val($(stencil-1))) * (1 + (newton_div(WCT, τ, β[$stencil] + ϵ))^2))
+        elem[stencil] = :(C★(scheme, Val($(stencil-1))) * (m⁻¹^2 + (r[$stencil] * m⁻¹)^2))
     end
 
     return :($(elem...),)
@@ -316,7 +333,13 @@ for buffer in advection_buffers[2:end]
     @eval begin
         @inline         beta_sum(scheme::WENO{$buffer, FT}, β₁, β₂)    where FT = @inbounds $(metaprogrammed_beta_sum(buffer))
         @inline        beta_loop(scheme::WENO{$buffer, FT}, ψ)         where FT = @inbounds $(metaprogrammed_beta_loop(buffer))
-        @inline zweno_alpha_loop(scheme::WENO{$buffer, FT, WCT}, β, τ) where {FT, WCT} = @inbounds $(metaprogrammed_zweno_alpha_loop(buffer))
+        @inline zweno_ratio_loop(scheme::WENO{$buffer, FT, WCT}, β, τ) where {FT, WCT} = @inbounds $(metaprogrammed_zweno_ratio_loop(buffer))
+
+        @inline function zweno_alpha_loop(scheme::WENO{$buffer, FT, WCT}, β, τ) where {FT, WCT}
+            r = zweno_ratio_loop(scheme, β, τ)
+            m⁻¹ = 1 / max(one(FT), r...)
+            return @inbounds $(metaprogrammed_zweno_alpha_loop(buffer))
+        end
     end
 end
 
