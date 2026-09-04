@@ -123,3 +123,29 @@ end
         @test Oceananigans.Advection.zweno_alpha_loop(scheme, β, τ) == α
     end
 end
+
+@testset "Bounds-preserving scaling at the bound" begin
+    using Oceananigans.Advection: bounds_preserving_scaling
+
+    # A Float32 tracer at its lower bound whose face reconstructions sit at the 1e-20 scale of a
+    # microphysics floor: the old ε-regularized denominator m - c + 1e-20 cancelled exactly and
+    # returned 0 / 0. The scaling must be 0 here (the faces collapse to the cell value).
+    θ = bounds_preserving_scaling(0f0, 2.2f-20, -1f-20, 0f0, 1f0)
+    @test isfinite(θ)
+    @test θ == 0
+
+    # No scaling when both reconstructions equal the cell value.
+    @test bounds_preserving_scaling(0.3f0, 0.3f0, 0.3f0, 0f0, 1f0) == 1
+
+    # Random stencils: θ is finite, in [0, 1], and the scaled faces stay within the bounds.
+    for FT in (Float32, Float64), trial in 1:2000
+        c = rand(FT)
+        c₋ᴿ = c + (rand(FT) - FT(0.5)) * FT(4)
+        c₊ᴸ = c + (rand(FT) - FT(0.5)) * FT(4)
+        θ = bounds_preserving_scaling(c, c₋ᴿ, c₊ᴸ, zero(FT), one(FT))
+        @test isfinite(θ) && 0 <= θ <= 1
+        tol = 8 * eps(FT)
+        @test -tol <= θ * (c₋ᴿ - c) + c <= 1 + tol
+        @test -tol <= θ * (c₊ᴸ - c) + c <= 1 + tol
+    end
+end
