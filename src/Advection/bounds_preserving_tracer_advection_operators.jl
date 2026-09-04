@@ -2,7 +2,28 @@ using Oceananigans.Grids: AbstractGrid
 
 const _ω̂₁ = 5/18
 const _ω̂ₙ = 5/18
-const _ε₂ = 1e-20
+
+# Zhang and Shu scaling factor θ ∈ [0, 1] that pulls the two face reconstructions of a cell toward
+# its value cᵢⱼ until both lie in [c_min, c_max]. `p̃` closes the convex combination
+# ω̂₁ c₋ᴿ + ω̂ₙ c₊ᴸ + (1 - 2ω̂₁) p̃ = cᵢⱼ, so m ≤ cᵢⱼ ≤ M and each ratio is non-negative in exact
+# arithmetic. A side whose extremum coincides with the cell value needs no scaling and gets θ = 1
+# outright; regularizing its denominator with a small constant instead can cancel it exactly when
+# the cell value sits on the bound and the reconstruction differs from it by that constant
+# (0 / 0 = NaN, seen with Float32 mixing ratios at a microphysics floor of 1e-20).
+@inline function bounds_preserving_scaling(cᵢⱼ, c₋ᴿ, c₊ᴸ, c_min, c_max)
+    FT = typeof(cᵢⱼ)
+    ω̂₁ = convert(FT, _ω̂₁)
+    ω̂ₙ = convert(FT, _ω̂ₙ)
+
+    p̃ = (cᵢⱼ - ω̂₁ * c₋ᴿ - ω̂ₙ * c₊ᴸ) / (1 - 2ω̂₁)
+    M = max(p̃, c₊ᴸ, c₋ᴿ)
+    m = min(p̃, c₊ᴸ, c₋ᴿ)
+
+    θ_max = ifelse(M > cᵢⱼ, abs((c_max - cᵢⱼ) / (M - cᵢⱼ)), one(FT))
+    θ_min = ifelse(m < cᵢⱼ, abs((c_min - cᵢⱼ) / (m - cᵢⱼ)), one(FT))
+
+    return min(θ_max, θ_min, one(FT))
+end
 
 # Note: this can probably be generalized to include UpwindBiased
 const BoundsPreservingWENO = WENO{<:Any, <:Any, <:Any, <:Any, <:Tuple}
@@ -36,19 +57,8 @@ end
     c₋ᴸ = _biased_interpolate_xᶠᵃᵃ(i,   j, k, grid, advection, LeftBias,  c)
     c₋ᴿ = _biased_interpolate_xᶠᵃᵃ(i,   j, k, grid, advection, RightBias, c)
 
-    FT = eltype(c)
-    ω̂₁ = convert(FT, _ω̂₁)
-    ω̂ₙ = convert(FT, _ω̂ₙ)
-    ε₂ = convert(FT, _ε₂)
-
     cᵢⱼ = @inbounds c[i, j, k]
-    p̃ = (cᵢⱼ - ω̂₁ * c₋ᴿ - ω̂ₙ * c₊ᴸ) / (1 - 2ω̂₁)
-    M = max(p̃, c₊ᴸ, c₋ᴿ)
-    m = min(p̃, c₊ᴸ, c₋ᴿ)
-
-    θ_max = abs((c_max - cᵢⱼ) / (M - cᵢⱼ + ε₂))
-    θ_min = abs((c_min - cᵢⱼ) / (m - cᵢⱼ + ε₂))
-    θ = min(θ_max, θ_min, one(grid))
+    θ = bounds_preserving_scaling(cᵢⱼ, c₋ᴿ, c₊ᴸ, c_min, c_max)
 
     c₊ᴸ = θ * (c₊ᴸ - cᵢⱼ) + cᵢⱼ
     c₋ᴿ = θ * (c₋ᴿ - cᵢⱼ) + cᵢⱼ
@@ -70,19 +80,8 @@ end
     c₋ᴸ = _biased_interpolate_yᵃᶠᵃ(i, j,   k, grid, advection, LeftBias,  c)
     c₋ᴿ = _biased_interpolate_yᵃᶠᵃ(i, j,   k, grid, advection, RightBias, c)
 
-    FT = eltype(c)
-    ω̂₁ = convert(FT, _ω̂₁)
-    ω̂ₙ = convert(FT, _ω̂ₙ)
-    ε₂ = convert(FT, _ε₂)
-
     cᵢⱼ = @inbounds c[i, j, k]
-    p̃ = (cᵢⱼ - ω̂₁ * c₋ᴿ - ω̂ₙ * c₊ᴸ) / (1 - 2ω̂₁)
-    M = max(p̃, c₊ᴸ, c₋ᴿ)
-    m = min(p̃, c₊ᴸ, c₋ᴿ)
-
-    θ_max = abs((c_max - cᵢⱼ) / (M - cᵢⱼ + ε₂))
-    θ_min = abs((c_min - cᵢⱼ) / (m - cᵢⱼ + ε₂))
-    θ = min(θ_max, θ_min, one(grid))
+    θ = bounds_preserving_scaling(cᵢⱼ, c₋ᴿ, c₊ᴸ, c_min, c_max)
 
     c₊ᴸ = θ * (c₊ᴸ - cᵢⱼ) + cᵢⱼ
     c₋ᴿ = θ * (c₋ᴿ - cᵢⱼ) + cᵢⱼ
@@ -104,19 +103,8 @@ end
     c₋ᴸ = _biased_interpolate_zᵃᵃᶠ(i, j, k,   grid, advection, LeftBias,  c)
     c₋ᴿ = _biased_interpolate_zᵃᵃᶠ(i, j, k,   grid, advection, RightBias, c)
 
-    FT = eltype(c)
-    ω̂₁ = convert(FT, _ω̂₁)
-    ω̂ₙ = convert(FT, _ω̂ₙ)
-    ε₂ = convert(FT, _ε₂)
-
     cᵢⱼ = @inbounds c[i, j, k]
-    p̃ = (cᵢⱼ - ω̂₁ * c₋ᴿ - ω̂ₙ * c₊ᴸ) / (1 - 2ω̂₁)
-    M = max(p̃, c₊ᴸ, c₋ᴿ)
-    m = min(p̃, c₊ᴸ, c₋ᴿ)
-
-    θ_max = abs((c_max - cᵢⱼ) / (M - cᵢⱼ + ε₂))
-    θ_min = abs((c_min - cᵢⱼ) / (m - cᵢⱼ + ε₂))
-    θ = min(θ_max, θ_min, one(grid))
+    θ = bounds_preserving_scaling(cᵢⱼ, c₋ᴿ, c₊ᴸ, c_min, c_max)
 
     c₊ᴸ = θ * (c₊ᴸ - cᵢⱼ) + cᵢⱼ
     c₋ᴿ = θ * (c₋ᴿ - cᵢⱼ) + cᵢⱼ
